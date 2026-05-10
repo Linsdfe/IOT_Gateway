@@ -1,0 +1,46 @@
+# 编译生成文件
+*.o
+*.a
+*.so
+*.so.*
+*.out
+*.elf
+*.bin
+*.hex
+*.ko          # 内核驱动模块（编译后生成，不要上传）
+*.mod.c
+*.mod.o
+*.symvers
+*.order
+
+# CMake生成文件
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+build/
+cmake-build-*/
+*.cmake
+
+# 日志和临时文件
+*.log
+*.log.*
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 配置文件（保留示例配置，不保留本地私有配置）
+*.conf
+!*.conf.example
+*.key
+*.secret
+
+# 交叉编译临时文件
+*.d
+*.su

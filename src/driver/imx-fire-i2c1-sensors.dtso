@@ -1,0 +1,26 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "fsl,imx6ull-14x14-evk", "fsl,imx6ull";
+
+    fragment@0 {
+        target = <&i2c1>;
+
+        __overlay__ {
+            status = "okay";
+
+            sht30@44 {
+                compatible = "sensirion,sht30";
+                reg = <0x44>;
+                status = "okay";
+            };
+
+            bh1750@23 {
+                compatible = "rohm,bh1750";
+                reg = <0x23>;
+                status = "okay";
+            };
+        };
+    };
+};
