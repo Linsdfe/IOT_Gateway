@@ -1,5 +1,10 @@
+/**
+ * @file gateway_sdk.cpp
+ * @brief IoT 网关 SDK 实现
+ */
+
 #include "gateway_sdk.h"
-#include <cstdio>
+#include "logger.h"
 #include <memory>
 
 namespace iot {
@@ -20,8 +25,11 @@ bool GatewaySDK::init(const GatewayConfig &cfg)
 
     sensor_.reset(new SensorReader(cfg_.i2cDev, cfg_.sht30Addr, cfg_.bh1750Addr));
     if (!sensor_->init()) {
-        fprintf(stderr, "[GatewaySDK] sensor init failed\n");
+        LOG_E("SDK", "sensor init failed");
         return false;
+    }
+    if (sensor_->isSimulated()) {
+        LOG_W("SDK", "running in SIMULATED sensor mode - check I2C connections");
     }
 
     dataMgr_.reset(new DataManager());
@@ -29,25 +37,29 @@ bool GatewaySDK::init(const GatewayConfig &cfg)
     if (cfg_.enableMqtt) {
         mqtt_.reset(new MqttPublisher());
         if (!mqtt_->init(cfg_.mqtt)) {
-            fprintf(stderr, "[GatewaySDK] mqtt init failed\n");
+            LOG_W("SDK", "mqtt init failed");
         }
     }
 
     if (cfg_.enableDisplay) {
+#if defined(USE_LVGL)
+        display_.reset(new LvglDisplay());
+#else
         display_.reset(new DisplayManager());
+#endif
         if (!display_->init(cfg_.display)) {
-            fprintf(stderr, "[GatewaySDK] display init failed\n");
+            LOG_W("SDK", "display init failed");
         }
     }
 
-    printf("[GatewaySDK] init OK\n");
+    LOG_I("SDK", "init OK");
     return true;
 }
 
 bool GatewaySDK::start()
 {
     if (!dataMgr_->start(sensor_.get(), cfg_.collectIntervalMs)) {
-        fprintf(stderr, "[GatewaySDK] data manager start failed\n");
+        LOG_E("SDK", "data manager start failed");
         return false;
     }
 
@@ -60,7 +72,7 @@ bool GatewaySDK::start()
     }
 
     running_ = true;
-    printf("[GatewaySDK] started\n");
+    LOG_I("SDK", "started");
     return true;
 }
 
@@ -70,7 +82,7 @@ void GatewaySDK::stop()
     if (display_) display_->stop();
     if (mqtt_) mqtt_->stop();
     if (dataMgr_) dataMgr_->stop();
-    printf("[GatewaySDK] stopped\n");
+    LOG_I("SDK", "stopped");
 }
 
 SensorData GatewaySDK::getLatestData()

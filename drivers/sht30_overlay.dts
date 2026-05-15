@@ -1,0 +1,27 @@
+/**
+ * @file sht30_overlay.dts
+ * @brief SHT30 设备树覆盖 - 声明 I2C1 总线上的 SHT30 设备
+ *
+ * 编译: dtc -@ -I dts -O dtb -o sht30_overlay.dtbo sht30_overlay.dts
+ * 加载: sudo mkdir -p /sys/kernel/config/device-tree/overlays/sht30
+ *       sudo cat sht30_overlay.dtbo > /sys/kernel/config/device-tree/overlays/sht30/dtbo
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "fsl,imx6ull-14x14-evk";
+
+    fragment@0 {
+        target = <&i2c1>;
+        __overlay__ {
+            status = "okay";
+
+            sht30: sht30@44 {
+                compatible = "sensirion,sht30";
+                reg = <0x44>;
+            };
+        };
+    };
+};

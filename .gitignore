@@ -19,8 +19,12 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 build/
+build-*/
 cmake-build-*/
 *.cmake
+!CMakeLists.txt
+
+*.tar.gz
 
 # 日志和临时文件
 *.log

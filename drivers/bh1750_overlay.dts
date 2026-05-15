@@ -1,0 +1,27 @@
+/**
+ * @file bh1750_overlay.dts
+ * @brief BH1750 设备树覆盖 - 声明 I2C1 总线上的 BH1750 设备
+ *
+ * 编译: dtc -@ -I dts -O dtb -o bh1750_overlay.dtbo bh1750_overlay.dts
+ * 加载: sudo mkdir -p /sys/kernel/config/device-tree/overlays/bh1750
+ *       sudo cat bh1750_overlay.dtbo > /sys/kernel/config/device-tree/overlays/bh1750/dtbo
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "fsl,imx6ull-14x14-evk";
+
+    fragment@0 {
+        target = <&i2c1>;
+        __overlay__ {
+            status = "okay";
+
+            bh1750: bh1750@23 {
+                compatible = "rohm,bh1750";
+                reg = <0x23>;
+            };
+        };
+    };
+};
