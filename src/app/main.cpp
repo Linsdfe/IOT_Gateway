@@ -1,26 +1,6 @@
 /**
  * @file main.cpp
- * @brief IoT 网关程序入口 - 命令行参数解析、配置初始化、生命周期管理
- *
- * 程序功能：
- *   1. 解析命令行参数，构建网关配置
- *   2. 初始化日志系统（控制台 + 文件双输出）
- *   3. 创建并启动 GatewaySDK
- *   4. 注册数据回调，实时打印传感器数据
- *   5. 处理信号（Ctrl+C），优雅停止网关
- *
- * 默认行为（无参数启动）：
- *   - 自动启用 OneNET 云平台连接
- *   - 自动启用 LCD 屏幕显示
- *   - 日志级别 DEBUG
- *   - 日志文件 /tmp/iot_gateway.log
- *
- * 使用示例：
- *   sudo ./iot_gateway                          # 默认配置（OneNET + 显示）
- *   sudo ./iot_gateway --no-display             # 关闭屏幕显示
- *   sudo ./iot_gateway --no-mqtt                # 关闭云平台连接
- *   sudo ./iot_gateway --log-level warn         # 仅显示警告和错误
- *   sudo ./iot_gateway --onenet-pid XXX ...     # 覆盖 OneNET 默认参数
+ * @brief IoT 网关程序入口
  */
 
 #include "gateway_sdk.h"
@@ -35,10 +15,7 @@ static iot::GatewaySDK *g_gateway = nullptr;
 static void signalHandler(int sig)
 {
     LOG_W("Main", "received signal %d, shutting down...", sig);
-    if (g_gateway) {
-        g_gateway->stop();
-    }
-    _exit(0);
+    if (g_gateway) g_gateway->stop();
 }
 
 int main(int argc, char *argv[])
@@ -48,7 +25,7 @@ int main(int argc, char *argv[])
 
     LOG_I("Main", "========================================");
     LOG_I("Main", "  Industrial IoT Edge Gateway");
-    LOG_I("Main", "  i.MX6ULL + SHT30 + BH1750");
+    LOG_I("Main", "  i.MX6ULL + Dynamic Plugin System");
 #if defined(USE_LVGL)
     LOG_I("Main", "  Display: LVGL Graphical Interface");
 #else
@@ -60,12 +37,11 @@ int main(int argc, char *argv[])
     signal(SIGTERM, signalHandler);
 
     iot::GatewayConfig cfg;
-
     cfg.i2cDev = "/dev/i2c-1";
     cfg.sht30Addr = 0x44;
     cfg.bh1750Addr = 0x23;
     cfg.collectIntervalMs = 2000;
-
+    cfg.pluginDir = "/usr/lib/iot/plugins";
     cfg.enableMqtt = true;
     cfg.mqtt.enabled = true;
     cfg.mqtt.cloudMode = MqttPublisher::CloudMode::Onenet;
@@ -75,7 +51,6 @@ int main(int argc, char *argv[])
     cfg.mqtt.host = "mqtts.heclouds.com";
     cfg.mqtt.port = 1883;
     cfg.mqtt.intervalSec = 5;
-
     cfg.enableDisplay = true;
     cfg.display.enabled = true;
     cfg.display.fbDevice = "/dev/fb0";
@@ -84,6 +59,8 @@ int main(int argc, char *argv[])
     cfg.display.height = 272;
     cfg.display.refreshMs = 33;
 #endif
+
+    bool listPlugins = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -110,6 +87,14 @@ int main(int argc, char *argv[])
             cfg.mqtt.onenet.deviceName = argv[++i];
         } else if (arg == "--onenet-dk" && i + 1 < argc) {
             cfg.mqtt.onenet.deviceKey = argv[++i];
+        } else if (arg == "--plugin-dir" && i + 1 < argc) {
+            cfg.pluginDir = argv[++i];
+        } else if (arg == "--plugin" && i + 1 < argc) {
+            cfg.pluginPath = argv[++i];
+        } else if (arg == "--plugin-config" && i + 1 < argc) {
+            cfg.pluginConfig = argv[++i];
+        } else if (arg == "--list-plugins") {
+            listPlugins = true;
 #if defined(USE_LVGL)
         } else if (arg == "--fb-width" && i + 1 < argc) {
             cfg.display.width = std::stoi(argv[++i]);
@@ -126,27 +111,46 @@ int main(int argc, char *argv[])
             else if (lv == "error") Logger::instance().setLevel(LogLevel::ERROR);
         } else if (arg == "--help") {
             printf("Usage: iot_gateway [OPTIONS]\n\n");
-            printf("Options:\n");
-            printf("  --mqtt HOST         Use plain MQTT, connect to HOST\n");
-            printf("  --mqtt-port PORT    MQTT port (default: 1883)\n");
-            printf("  --mqtt-topic TOPIC  MQTT publish topic\n");
-            printf("  --no-display        Disable display\n");
-            printf("  --no-mqtt           Disable MQTT cloud connection\n");
-            printf("  --interval MS       Collect interval in ms (default: 2000)\n");
-            printf("  --log-level LEVEL   Log level: debug|info|warn|error\n");
-#if defined(USE_LVGL)
-            printf("\nLVGL Display Options:\n");
-            printf("  --fb-width W        Framebuffer width (default: 480)\n");
-            printf("  --fb-height H       Framebuffer height (default: 272)\n");
-            printf("  --fb-refresh MS     Refresh interval ms (default: 33)\n");
-#endif
-            printf("\nOneNET IoT Options (overrides defaults):\n");
-            printf("  --onenet-pid ID     Product ID\n");
-            printf("  --onenet-dn NAME    Device Name\n");
-            printf("  --onenet-dk KEY     Device Key (base64)\n");
-            printf("\nDefaults: display=ON, OneNET=ON (PID=XUV077XBf9 DN=imx6ull_01)\n");
+            printf("Sensor Plugin Modes (use --plugin NAME):\n");
+            printf("  sht30_bh1750_i2c     User-space I2C protocol (no kernel driver)\n");
+            printf("  sht30_bh1750_kernel  Linux kernel standard IIO drivers\n");
+            printf("  sht30_bh1750_custom  Custom kernel drivers (sht30_driver.ko + bh1750_driver.ko)\n");
+            printf("  simulated            Simulated sensor data (no hardware)\n");
+            printf("\nExamples:\n");
+            printf("  sudo ./iot_gateway --plugin sht30_bh1750_i2c\n");
+            printf("  sudo ./iot_gateway --plugin sht30_bh1750_kernel\n");
+            printf("  sudo ./iot_gateway --plugin sht30_bh1750_custom\n");
+            printf("  sudo ./iot_gateway --plugin simulated\n");
+            printf("\nOptions:\n");
+            printf("  --plugin NAME        Plugin name or .so path\n");
+            printf("  --plugin-dir DIR     Plugin directory (default: /usr/lib/iot/plugins)\n");
+            printf("  --plugin-config C    Plugin config string\n");
+            printf("  --list-plugins       List available plugins and exit\n");
+            printf("  --no-display         Disable display\n");
+            printf("  --no-mqtt            Disable MQTT cloud connection\n");
+            printf("  --interval MS        Collect interval (default: 2000)\n");
+            printf("  --log-level LEVEL    debug|info|warn|error\n");
+            printf("  --mqtt HOST          Use plain MQTT\n");
+            printf("  --onenet-pid ID      OneNET Product ID\n");
+            printf("  --onenet-dn NAME     OneNET Device Name\n");
+            printf("  --onenet-dk KEY      OneNET Device Key\n");
             return 0;
         }
+    }
+
+    if (listPlugins) {
+        printf("Scanning plugin directory: %s\n\n", cfg.pluginDir.c_str());
+        SensorReader reader(cfg.pluginDir);
+        auto plugins = reader.listPlugins();
+        if (plugins.empty()) {
+            printf("No plugins found.\n");
+        } else {
+            printf("Available plugins:\n");
+            for (const auto &p : plugins) {
+                printf("  %-25s  %s  (api=%d)\n", p.name.c_str(), p.description.c_str(), p.apiVersion);
+            }
+        }
+        return 0;
     }
 
     if (cfg.mqtt.cloudMode == MqttPublisher::CloudMode::Onenet) {
@@ -179,7 +183,8 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    LOG_I("Main", "gateway running, press Ctrl+C to stop");
+    LOG_I("Main", "gateway running with plugin '%s', press Ctrl+C to stop",
+          gateway.getPluginName().c_str());
 
     while (gateway.isRunning()) {
         sleep(1);
@@ -187,7 +192,6 @@ int main(int argc, char *argv[])
 
     gateway.stop();
     g_gateway = nullptr;
-
     Logger::instance().close();
     return 0;
 }

@@ -4,7 +4,7 @@
  *
  * 通过 I2C 子系统与 BH1750 通信，提供 sysfs 接口读取光照强度。
  * 加载后创建 sysfs 属性文件：
- *   - illuminance: 当前光照值（lux 的 1000 倍，如 14200 = 14.2 lux）
+ *   - illuminance: 当前光照值（毫lux，如 29200 = 29.2 lux）
  *
  * 使用方式：
  *   insmod bh1750_driver.ko
@@ -18,7 +18,7 @@
 #include <linux/delay.h>
 #include <linux/err.h>
 
-#define BH1750_CMD_CONT_H_RES   0x10
+#define BH1750_CMD_ONE_H_RES    0x20
 
 struct bh1750_data {
     struct i2c_client *client;
@@ -30,7 +30,7 @@ static int bh1750_read_raw(struct i2c_client *client,
                            u8 *buf, int len)
 {
     int ret;
-    u8 cmd = BH1750_CMD_CONT_H_RES;
+    u8 cmd = BH1750_CMD_ONE_H_RES;
 
     ret = i2c_master_send(client, &cmd, 1);
     if (ret != 1) {
@@ -64,7 +64,7 @@ static int bh1750_update_value(struct bh1750_data *data)
     }
 
     raw = (buf[0] << 8) | buf[1];
-    data->illuminance = (int)((u32)raw * 1000 / 12);
+    data->illuminance = (int)((u32)raw * 10000 / 12);
 
     mutex_unlock(&data->lock);
     return 0;
@@ -128,20 +128,20 @@ static int bh1750_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id bh1750_id[] = {
-    { "bh1750", 0 },
+    { "bh1750_custom", 0 },
     { }
 };
 MODULE_DEVICE_TABLE(i2c, bh1750_id);
 
 static const struct of_device_id bh1750_of_match[] = {
-    { .compatible = "rohm,bh1750" },
+    { .compatible = "rohm,bh1750_custom" },
     { }
 };
 MODULE_DEVICE_TABLE(of, bh1750_of_match);
 
 static struct i2c_driver bh1750_driver = {
     .driver = {
-        .name = "bh1750",
+        .name = "bh1750_custom",
         .of_match_table = bh1750_of_match,
     },
     .probe   = bh1750_probe,

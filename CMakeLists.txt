@@ -1,14 +1,3 @@
-# CMakeLists.txt - IoT 网关项目构建配置
-#
-# 编译选项：
-#   -DUSE_MOSQUITTO=ON    启用 MQTT 支持（需 libmosquitto-dev）
-#   -DUSE_LVGL=ON         启用 LVGL 图形界面（推荐，与 ENABLE_DISPLAY 互斥）
-#   -DENABLE_DISPLAY=ON   启用简单 Framebuffer 显示（备选方案）
-#
-# 编译示例：
-#   开发板本地编译：cmake .. -DUSE_MOSQUITTO=ON -DUSE_LVGL=ON
-#   交叉编译：      cmake .. -DCMAKE_TOOLCHAIN_FILE=tools/arm-linux-gnueabihf.cmake -DUSE_LVGL=ON
-
 cmake_minimum_required(VERSION 3.10)
 project(iot_gateway C CXX)
 
@@ -16,19 +5,19 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
-# 编译选项：MQTT / 显示 / LVGL（三选二，LVGL 优先于 Framebuffer）
 option(USE_MOSQUITTO "Enable Mosquitto MQTT support" OFF)
 option(ENABLE_DISPLAY "Enable framebuffer display" OFF)
 option(USE_LVGL "Enable LVGL graphical interface" OFF)
 
-# Debug 模式下禁用优化，方便 GDB 调试
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     message(STATUS "Debug build: -g -O0 enabled")
     set(CMAKE_C_FLAGS_DEBUG "-g -O0")
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 endif()
 
-# 核心源文件列表（不含显示模块，显示模块根据编译选项选择）
+set(PLUGIN_OUTPUT_DIR "${CMAKE_BINARY_DIR}/plugins")
+file(MAKE_DIRECTORY ${PLUGIN_OUTPUT_DIR})
+
 set(SOURCES
     src/app/main.cpp
     src/app/logger.cpp
@@ -37,9 +26,9 @@ set(SOURCES
     src/app/mqtt_publisher.cpp
     src/app/onenet_iot.cpp
     src/sdk/gateway_sdk.cpp
+    src/plugin/plugin_loader.cpp
 )
 
-# 显示模块二选一：LVGL 图形界面 或 简单 Framebuffer
 if(USE_LVGL)
     list(APPEND SOURCES src/app/lvgl_display.cpp)
 else()
@@ -51,19 +40,46 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/src/app
     ${CMAKE_SOURCE_DIR}/src/sdk
+    ${CMAKE_SOURCE_DIR}/src/plugin
 )
 
-# 线程支持（pthread）
 find_package(Threads REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads)
+target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
 
-# ========== 依赖库配置：交叉编译 vs 本地编译 ==========
+# Plugin 1: sht30_bh1750_i2c - User-space I2C protocol (no kernel driver)
+add_library(sht30_bh1750_i2c_plugin SHARED src/plugin/sht30_bh1750_i2c_plugin.cpp)
+target_include_directories(sht30_bh1750_i2c_plugin PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
+set_target_properties(sht30_bh1750_i2c_plugin PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${PLUGIN_OUTPUT_DIR} PREFIX "lib"
+)
+target_link_libraries(sht30_bh1750_i2c_plugin PRIVATE Threads::Threads)
+
+# Plugin 2: sht30_bh1750_kernel - Linux kernel standard IIO drivers
+add_library(sht30_bh1750_kernel_plugin SHARED src/plugin/sht30_bh1750_kernel_plugin.cpp)
+target_include_directories(sht30_bh1750_kernel_plugin PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
+set_target_properties(sht30_bh1750_kernel_plugin PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${PLUGIN_OUTPUT_DIR} PREFIX "lib"
+)
+
+# Plugin 3: sht30_bh1750_custom - Custom kernel drivers
+add_library(sht30_bh1750_custom_plugin SHARED src/plugin/sht30_bh1750_custom_plugin.cpp)
+target_include_directories(sht30_bh1750_custom_plugin PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
+set_target_properties(sht30_bh1750_custom_plugin PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${PLUGIN_OUTPUT_DIR} PREFIX "lib"
+)
+
+# Plugin 4: simulated - Simulated sensor data
+add_library(simulated_plugin SHARED src/plugin/simulated_plugin.cpp)
+target_include_directories(simulated_plugin PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin)
+set_target_properties(simulated_plugin PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${PLUGIN_OUTPUT_DIR} PREFIX "lib"
+)
+
 if(CMAKE_CROSSCOMPILING)
-    # 交叉编译模式：从 sysroot 目录查找 ARM 库
     set(SYSROOT_LIB "${CMAKE_SOURCE_DIR}/tools/sysroot/usr/lib/arm-linux-gnueabihf")
     set(SYSROOT_INC "${CMAKE_SOURCE_DIR}/tools/sysroot/usr/include")
 
-    # OpenSSL（OneNET Token 签名需要）
     set(LIBSSL_SO "${SYSROOT_LIB}/libssl.so")
     set(LIBCRYPTO_SO "${SYSROOT_LIB}/libcrypto.so")
 
@@ -75,7 +91,6 @@ if(CMAKE_CROSSCOMPILING)
         message(WARNING "OpenSSL not found in sysroot")
     endif()
 
-    # Mosquitto（MQTT 通信需要）
     if(USE_MOSQUITTO)
         set(MOSQUITTO_H "${SYSROOT_INC}/mosquitto.h")
         set(MOSQUITTO_SO "${SYSROOT_LIB}/libmosquitto.so")
@@ -89,11 +104,8 @@ if(CMAKE_CROSSCOMPILING)
         endif()
     endif()
 
-    # 允许交叉编译时链接宿主机不存在的共享库
     target_link_options(${PROJECT_NAME} PRIVATE "-Wl,--allow-shlib-undefined")
-    message(STATUS "Cross-compile: using --allow-shlib-undefined for glibc compatibility")
 else()
-    # 本地编译模式：从系统路径查找库
     find_package(OpenSSL REQUIRED)
     target_link_libraries(${PROJECT_NAME} PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
@@ -112,25 +124,23 @@ else()
     endif()
 endif()
 
-# ========== LVGL 图形库集成 ==========
 if(USE_LVGL)
-    # 定义编译宏：ENABLE_LVGL + USE_LVGL（条件编译用）+ ENABLE_DISPLAY
     target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_LVGL USE_LVGL ENABLE_DISPLAY)
     target_include_directories(${PROJECT_NAME} PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party/lvgl
         ${CMAKE_SOURCE_DIR}/src/app
     )
-    # 设置 LVGL 配置文件路径（lv_conf.h 必须在 LVGL 包含路径中）
     set(LV_CONF_PATH "${CMAKE_SOURCE_DIR}/src/app/lv_conf.h" CACHE FILEPATH "Path to lv_conf.h" FORCE)
-    # 添加 LVGL 子目录（使用 LVGL 自带的 CMakeLists.txt）
     add_subdirectory(third_party/lvgl)
     target_link_libraries(${PROJECT_NAME} PRIVATE lvgl)
-    # 将 lv_conf.h 所在目录加入 LVGL 的包含路径
     target_include_directories(lvgl PUBLIC ${CMAKE_SOURCE_DIR}/src/app)
-    message(STATUS "LVGL graphical interface: ENABLED (lv_conf=${LV_CONF_PATH})")
+    message(STATUS "LVGL graphical interface: ENABLED")
 elseif(ENABLE_DISPLAY)
     target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_DISPLAY)
     message(STATUS "Framebuffer display: ENABLED")
 endif()
 
 install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
+install(TARGETS sht30_bh1750_i2c_plugin sht30_bh1750_kernel_plugin sht30_bh1750_custom_plugin simulated_plugin
+    LIBRARY DESTINATION lib/iot/plugins
+)

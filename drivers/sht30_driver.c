@@ -19,6 +19,7 @@
 #include <linux/mutex.h>
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/math64.h>
 
 #define SHT30_CMD_MEASURE_HPM   0x2C06
 #define SHT30_CMD_MSB(x)        ((x) >> 8)
@@ -72,8 +73,8 @@ static int sht30_update_values(struct sht30_data *data)
     raw_temp = (buf[0] << 8) | buf[1];
     raw_humi = (buf[3] << 8) | buf[4];
 
-    data->temperature = -45000 + 175000 * (int)raw_temp / 65535;
-    data->humidity    = 100000 * (int)raw_humi / 65535;
+    data->temperature = -45000 + (int)div_s64((s64)175000 * raw_temp, 65535);
+    data->humidity    = (int)div_s64((s64)100000 * raw_humi, 65535);
 
     mutex_unlock(&data->lock);
     return 0;

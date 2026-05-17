@@ -1,0 +1,1 @@
+cmd_/home/lin/Desktop/IOT_Gateway/drivers/bh1750_driver.ko := arm-linux-gnueabihf-ld -r -EL -T ./scripts/module-common.lds -T ./arch/arm/kernel/module.lds  --build-id  -o /home/lin/Desktop/IOT_Gateway/drivers/bh1750_driver.ko /home/lin/Desktop/IOT_Gateway/drivers/bh1750_driver.o /home/lin/Desktop/IOT_Gateway/drivers/bh1750_driver.mod.o ;  true

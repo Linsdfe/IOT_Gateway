@@ -1,50 +1,17 @@
 /**
  * @file sensor_reader.cpp
- * @brief I2C 传感器读取器实现
- *
- * SHT30 通信流程：
- *   1. 发送命令码 0x2C06（单次测量，高重复性）
- *   2. 等待 20ms 测量完成
- *   3. 读取 6 字节：[温度MSB][温度LSB][CRC][湿度MSB][湿度LSB][CRC]
- *   4. 转换公式：温度 = -45 + 175 × raw / 65535
- *              湿度 = 100 × raw / 65535
- *
- * BH1750 通信流程：
- *   1. 发送命令码 0x10（连续高分辨率模式，1 lux 精度）
- *   2. 等待 180ms 测量完成
- *   3. 读取 2 字节：[MSB][LSB]
- *   4. 转换公式：光照 = raw / 1.2
- *
- * 模拟数据模式：
- *   当传感器连续3次读取失败后，自动切换到模拟数据模式。
- *   模拟数据以正弦波形式周期性变化，模拟真实传感器波动。
- *   每隔30次读取尝试恢复真实传感器连接。
+ * @brief 传感器读取器实现 - 基于动态插件架构
  */
 
 #include "sensor_reader.h"
 #include "logger.h"
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <linux/i2c-dev.h>
-#include <cstring>
-#include <cstdio>
 #include <cmath>
-#include <errno.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
-static const int SIMULATE_THRESHOLD = 3;
-static const int RECOVER_INTERVAL = 30;
-
-SensorReader::SensorReader(const std::string &i2c_dev,
-                           uint8_t sht30_addr,
-                           uint8_t bh1750_addr)
-    : i2cDev_(i2c_dev)
-    , sht30Addr_(sht30_addr)
-    , bh1750Addr_(bh1750_addr)
-    , fd_sht30_(-1)
-    , fd_bh1750_(-1)
-    , simulated_(false)
-    , failCount_(0)
+SensorReader::SensorReader(const std::string &pluginDir)
+    : pluginDir_(pluginDir)
+    , builtinSimulated_(false)
     , simStep_(0)
     , simTemp_(25.0f)
     , simHumi_(60.0f)
@@ -54,204 +21,182 @@ SensorReader::SensorReader(const std::string &i2c_dev,
 
 SensorReader::~SensorReader()
 {
-    if (fd_sht30_ >= 0) close(fd_sht30_);
-    if (fd_bh1750_ >= 0) close(fd_bh1750_);
+    if (loader_.isLoaded()) {
+        loader_.unload();
+    }
 }
 
-int SensorReader::openI2CDev(uint8_t addr)
+std::string SensorReader::resolvePluginName(const std::string &name)
 {
-    int fd = open(i2cDev_.c_str(), O_RDWR);
-    if (fd < 0) {
-        LOG_E("Sensor", "open %s failed: %s", i2cDev_.c_str(), strerror(errno));
-        return -1;
+    if (name.empty()) return "";
+
+    if (name.find('/') != std::string::npos) return name;
+
+    if (name.size() > 3 && name.substr(0, 3) == "lib" &&
+        name.size() > 3 && name.substr(name.size() - 3) == ".so") {
+        return name;
     }
-    if (ioctl(fd, I2C_SLAVE, addr) < 0) {
-        LOG_E("Sensor", "set addr 0x%02x failed: %s", addr, strerror(errno));
-        close(fd);
-        return -1;
+
+    std::string soPath = pluginDir_;
+    if (!soPath.empty() && soPath.back() != '/') soPath += '/';
+    soPath += "lib" + name + "_plugin.so";
+
+    struct stat st;
+    if (stat(soPath.c_str(), &st) == 0) {
+        LOG_D("Sensor", "resolved plugin '%s' -> %s", name.c_str(), soPath.c_str());
+        return soPath;
     }
-    return fd;
+
+    soPath = pluginDir_;
+    if (!soPath.empty() && soPath.back() != '/') soPath += '/';
+    soPath += "lib" + name + ".so";
+
+    if (stat(soPath.c_str(), &st) == 0) {
+        LOG_D("Sensor", "resolved plugin '%s' -> %s", name.c_str(), soPath.c_str());
+        return soPath;
+    }
+
+    LOG_D("Sensor", "scanning plugin dir for name '%s'", name.c_str());
+    std::vector<PluginInfo> plugins = loader_.scanDirectory(pluginDir_);
+    for (const auto &p : plugins) {
+        if (p.name == name) {
+            LOG_D("Sensor", "resolved plugin '%s' -> %s (by scan)", name.c_str(), p.path.c_str());
+            return p.path;
+        }
+    }
+
+    LOG_W("Sensor", "cannot resolve plugin name '%s'", name.c_str());
+    return "";
 }
 
 bool SensorReader::init()
 {
-    fd_sht30_ = openI2CDev(sht30Addr_);
-    if (fd_sht30_ < 0) {
-        LOG_W("Sensor", "SHT30 not available, will use simulated data");
-        simulated_ = true;
+    if (!pluginPath_.empty()) {
+        std::string resolved = resolvePluginName(pluginPath_);
+        if (!resolved.empty()) {
+            LOG_I("Sensor", "loading specified plugin: %s (resolved from '%s')",
+                  resolved.c_str(), pluginPath_.c_str());
+            if (loader_.load(resolved)) {
+                if (loader_.init(pluginConfig_)) {
+                    LOG_I("Sensor", "plugin '%s' loaded and initialized", loader_.getPluginName().c_str());
+                    return true;
+                }
+                LOG_W("Sensor", "plugin '%s' init failed, falling back", loader_.getPluginName().c_str());
+                loader_.unload();
+            }
+        }
+        LOG_W("Sensor", "specified plugin failed, trying plugin directory");
     }
 
-    fd_bh1750_ = openI2CDev(bh1750Addr_);
-    if (fd_bh1750_ < 0) {
-        LOG_W("Sensor", "BH1750 not available, will use simulated data");
-        simulated_ = true;
-    }
+    if (!pluginDir_.empty()) {
+        LOG_I("Sensor", "scanning plugin directory: %s", pluginDir_.c_str());
+        std::vector<PluginInfo> plugins = loader_.scanDirectory(pluginDir_);
 
-    if (simulated_) {
-        LOG_I("Sensor", "init OK (SIMULATED MODE - sensors not detected on %s)",
-              i2cDev_.c_str());
-    } else {
-        LOG_I("Sensor", "init OK (SHT30=0x%02x, BH1750=0x%02x)",
-              sht30Addr_, bh1750Addr_);
-    }
-    return true;
-}
+        if (!plugins.empty()) {
+            const PluginInfo &first = plugins[0];
+            LOG_I("Sensor", "found %zu plugin(s), loading: %s", plugins.size(), first.name.c_str());
 
-bool SensorReader::sht30SendCmd(uint8_t msb, uint8_t lsb)
-{
-    uint8_t cmd[2] = {msb, lsb};
-    if (write(fd_sht30_, cmd, 2) != 2) {
-        LOG_E("Sensor", "SHT30 write cmd failed: %s", strerror(errno));
-        return false;
-    }
-    return true;
-}
-
-bool SensorReader::sht30ReadRaw(uint8_t *buf, int len)
-{
-    if (read(fd_sht30_, buf, len) != len) {
-        LOG_E("Sensor", "SHT30 read failed: %s", strerror(errno));
-        return false;
-    }
-    return true;
-}
-
-bool SensorReader::readSHT30(float &temp, float &humi)
-{
-    if (!sht30SendCmd(0x2C, 0x06))
-        return false;
-
-    usleep(20000);
-
-    uint8_t buf[6];
-    if (!sht30ReadRaw(buf, 6))
-        return false;
-
-    uint16_t raw_temp = (buf[0] << 8) | buf[1];
-    uint16_t raw_humi = (buf[3] << 8) | buf[4];
-
-    temp = -45.0f + 175.0f * raw_temp / 65535.0f;
-    humi = 100.0f * raw_humi / 65535.0f;
-
-    return true;
-}
-
-bool SensorReader::bh1750SendCmd(uint8_t cmd)
-{
-    if (write(fd_bh1750_, &cmd, 1) != 1) {
-        LOG_E("Sensor", "BH1750 write cmd failed: %s", strerror(errno));
-        return false;
-    }
-    return true;
-}
-
-bool SensorReader::bh1750ReadRaw(uint8_t *buf, int len)
-{
-    if (read(fd_bh1750_, buf, len) != len) {
-        LOG_E("Sensor", "BH1750 read failed: %s", strerror(errno));
-        return false;
-    }
-    return true;
-}
-
-bool SensorReader::readBH1750(float &light)
-{
-    if (!bh1750SendCmd(0x10))
-        return false;
-
-    usleep(180000);
-
-    uint8_t buf[2];
-    if (!bh1750ReadRaw(buf, 2))
-        return false;
-
-    uint16_t raw = (buf[0] << 8) | buf[1];
-    light = raw / 1.2f;
-
-    return true;
-}
-
-void SensorReader::generateSimulated(SensorData &data)
-{
-    simStep_++;
-    float t = simStep_ * 0.05f;
-
-    simTemp_ = 25.0f + 5.0f * sinf(t * 0.3f);
-    simHumi_ = 60.0f + 15.0f * sinf(t * 0.2f + 1.0f);
-    simLight_ = 200.0f + 150.0f * sinf(t * 0.15f + 2.0f);
-
-    if (simHumi_ < 0) simHumi_ = 0;
-    if (simHumi_ > 100) simHumi_ = 100;
-    if (simLight_ < 0) simLight_ = 0;
-
-    data.temperature = simTemp_;
-    data.humidity = simHumi_;
-    data.light = simLight_;
-    data.valid = true;
-}
-
-bool SensorReader::tryRecover()
-{
-    if (fd_sht30_ >= 0) {
-        close(fd_sht30_);
-        fd_sht30_ = -1;
-    }
-    if (fd_bh1750_ >= 0) {
-        close(fd_bh1750_);
-        fd_bh1750_ = -1;
-    }
-
-    fd_sht30_ = openI2CDev(sht30Addr_);
-    fd_bh1750_ = openI2CDev(bh1750Addr_);
-
-    if (fd_sht30_ >= 0 && fd_bh1750_ >= 0) {
-        float temp, humi, light;
-        if (readSHT30(temp, humi) && readBH1750(light)) {
-            simulated_ = false;
-            failCount_ = 0;
-            LOG_I("Sensor", "recovered from simulated mode - real sensors active");
-            return true;
+            if (loader_.load(first.path)) {
+                std::string config = pluginConfig_.empty() ? "" : pluginConfig_;
+                if (loader_.init(config)) {
+                    LOG_I("Sensor", "plugin '%s' loaded and initialized", loader_.getPluginName().c_str());
+                    return true;
+                }
+                LOG_W("Sensor", "plugin '%s' init failed", first.name.c_str());
+                loader_.unload();
+            }
         }
     }
 
-    if (fd_sht30_ >= 0) { close(fd_sht30_); fd_sht30_ = -1; }
-    if (fd_bh1750_ >= 0) { close(fd_bh1750_); fd_bh1750_ = -1; }
-    return false;
+    builtinSimulated_ = true;
+    LOG_W("Sensor", "no plugin available, using BUILTIN SIMULATED MODE");
+    return true;
 }
 
 bool SensorReader::readAll(SensorData &data)
 {
-    if (simulated_) {
-        generateSimulated(data);
-        if (simStep_ % RECOVER_INTERVAL == 0) {
-            tryRecover();
-        }
+    if (builtinSimulated_) {
+        generateBuiltinSimulated(data);
         return true;
     }
 
-    bool ok = true;
-    if (!readSHT30(data.temperature, data.humidity)) {
-        data.temperature = 0.0f;
-        data.humidity = 0.0f;
-        ok = false;
-    }
-    if (!readBH1750(data.light)) {
-        data.light = 0.0f;
-        ok = false;
+    if (!loader_.isInitialized()) {
+        generateBuiltinSimulated(data);
+        return true;
     }
 
-    if (!ok) {
-        failCount_++;
-        if (failCount_ >= SIMULATE_THRESHOLD) {
-            simulated_ = true;
-            LOG_W("Sensor", "switched to SIMULATED MODE after %d failures", failCount_);
-            generateSimulated(data);
-            return true;
-        }
-    } else {
-        failCount_ = 0;
+    PluginSensorData pdata;
+    if (loader_.read(pdata)) {
+        data.temperature = pdata.temperature;
+        data.humidity = pdata.humidity;
+        data.light = pdata.light;
+        data.valid = pdata.valid;
+        return true;
     }
 
-    data.valid = ok;
-    return ok;
+    data.temperature = 0.0f;
+    data.humidity = 0.0f;
+    data.light = 0.0f;
+    data.valid = false;
+    return false;
+}
+
+bool SensorReader::isSimulated() const
+{
+    if (builtinSimulated_) return true;
+    return loader_.isSimulated();
+}
+
+void SensorReader::setPluginDir(const std::string &dir) { pluginDir_ = dir; }
+void SensorReader::setPluginPath(const std::string &path) { pluginPath_ = path; }
+void SensorReader::setPluginConfig(const std::string &config) { pluginConfig_ = config; }
+
+bool SensorReader::hotSwapPlugin(const std::string &newPath, const std::string &config)
+{
+    std::string resolved = resolvePluginName(newPath);
+    if (resolved.empty()) resolved = newPath;
+
+    LOG_I("Sensor", "hot-swapping plugin to: %s", resolved.c_str());
+    builtinSimulated_ = false;
+
+    if (loader_.hotSwap(resolved, config)) {
+        LOG_I("Sensor", "hot-swap successful, now using: %s", loader_.getPluginName().c_str());
+        return true;
+    }
+
+    builtinSimulated_ = true;
+    LOG_E("Sensor", "hot-swap failed, falling back to builtin simulated mode");
+    return false;
+}
+
+std::vector<PluginInfo> SensorReader::listPlugins() { return loader_.scanDirectory(pluginDir_); }
+
+std::string SensorReader::getPluginName() const
+{
+    if (builtinSimulated_) return "builtin_simulated";
+    return loader_.getPluginName();
+}
+
+std::string SensorReader::getPluginPath() const
+{
+    if (builtinSimulated_) return "";
+    return loader_.getPluginPath();
+}
+
+PluginLoader &SensorReader::loader() { return loader_; }
+
+void SensorReader::generateBuiltinSimulated(SensorData &data)
+{
+    simStep_++;
+    float t = simStep_ * 0.05f;
+    simTemp_ = 25.0f + 5.0f * sinf(t * 0.3f);
+    simHumi_ = 60.0f + 15.0f * sinf(t * 0.2f + 1.0f);
+    simLight_ = 200.0f + 150.0f * sinf(t * 0.15f + 2.0f);
+    if (simHumi_ < 0) simHumi_ = 0;
+    if (simHumi_ > 100) simHumi_ = 100;
+    if (simLight_ < 0) simLight_ = 0;
+    data.temperature = simTemp_;
+    data.humidity = simHumi_;
+    data.light = simLight_;
+    data.valid = true;
 }

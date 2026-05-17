@@ -6,6 +6,7 @@
 #include "gateway_sdk.h"
 #include "logger.h"
 #include <memory>
+#include <cstdio>
 
 namespace iot {
 
@@ -23,14 +24,30 @@ bool GatewaySDK::init(const GatewayConfig &cfg)
 {
     cfg_ = cfg;
 
-    sensor_.reset(new SensorReader(cfg_.i2cDev, cfg_.sht30Addr, cfg_.bh1750Addr));
+    sensor_.reset(new SensorReader(cfg_.pluginDir));
+
+    if (!cfg_.pluginPath.empty()) {
+        sensor_->setPluginPath(cfg_.pluginPath);
+    }
+
+    if (!cfg_.pluginConfig.empty()) {
+        sensor_->setPluginConfig(cfg_.pluginConfig);
+    } else if (!cfg_.i2cDev.empty()) {
+        char addrBuf[64];
+        snprintf(addrBuf, sizeof(addrBuf), "i2c=%s;sht30=0x%02x;bh1750=0x%02x",
+                 cfg_.i2cDev.c_str(), cfg_.sht30Addr, cfg_.bh1750Addr);
+        sensor_->setPluginConfig(addrBuf);
+    }
+
     if (!sensor_->init()) {
         LOG_E("SDK", "sensor init failed");
         return false;
     }
     if (sensor_->isSimulated()) {
-        LOG_W("SDK", "running in SIMULATED sensor mode - check I2C connections");
+        LOG_W("SDK", "running in SIMULATED sensor mode - check plugin/I2C");
     }
+
+    LOG_I("SDK", "active plugin: %s", sensor_->getPluginName().c_str());
 
     dataMgr_.reset(new DataManager());
 
@@ -116,6 +133,24 @@ bool GatewaySDK::sendToCloud(const std::string &json)
 bool GatewaySDK::isRunning() const
 {
     return running_;
+}
+
+bool GatewaySDK::hotSwapPlugin(const std::string &newPath, const std::string &config)
+{
+    if (!sensor_) return false;
+    return sensor_->hotSwapPlugin(newPath, config);
+}
+
+std::string GatewaySDK::getPluginName() const
+{
+    if (!sensor_) return "none";
+    return sensor_->getPluginName();
+}
+
+std::vector<PluginInfo> GatewaySDK::listPlugins()
+{
+    if (!sensor_) return {};
+    return sensor_->listPlugins();
 }
 
 }
