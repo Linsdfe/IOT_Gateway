@@ -8,7 +8,6 @@
 #include <csignal>
 #include <cstdio>
 #include <unistd.h>
-#include <cstring>
 
 static iot::GatewaySDK *g_gateway = nullptr;
 
@@ -45,9 +44,7 @@ int main(int argc, char *argv[])
     cfg.enableMqtt = true;
     cfg.mqtt.enabled = true;
     cfg.mqtt.cloudMode = MqttPublisher::CloudMode::Onenet;
-    cfg.mqtt.onenet.productId = "XUV077XBf9";
-    cfg.mqtt.onenet.deviceName = "imx6ull_01";
-    cfg.mqtt.onenet.deviceKey = "UG83cDgySktEQWZhNHdLRXQ2WHd6TGRaZUtSdG9CZTI=";
+    
     cfg.mqtt.host = "mqtts.heclouds.com";
     cfg.mqtt.port = 1883;
     cfg.mqtt.intervalSec = 5;

@@ -10,10 +10,11 @@
 4. [传感器驱动开发](#4-传感器驱动开发)
 5. [内核驱动模块集成](#5-内核驱动模块集成)
 6. [应用层开发（C++多线程）](#6-应用层开发c多线程)
-7. [MQTT通信与云平台接入](#7-mqtt通信与云平台接入)
-8. [LCD显示（Framebuffer + LVGL）](#8-lcd显示framebuffer--lvgl)
-9. [SDK封装](#9-sdk封装)
-10. [附录](#附录)
+7. [边缘计算模块](#7-边缘计算模块)
+8. [MQTT通信与云平台接入](#8-mqtt通信与云平台接入)
+9. [LCD显示（Framebuffer + LVGL）](#9-lcd显示framebuffer--lvgl)
+10. [SDK封装](#10-sdk封装)
+11. [附录](#附录)
 
 ***
 
@@ -241,10 +242,10 @@ OneNET使用基于HMAC-SHA1的Token认证，流程如下：
 
 ```
 1. 签名内容 = "过期时间\n签名方法\n资源路径\n版本号"
-   例: "1735689600\nsha1\nproducts/XUV077XBf9/devices/imx6ull_01\n2018-10-31"
+   例: "1735689600\nsha1\nproducts/ABCDEFGHIJ/devices/my_device_01\n2018-10-31"
 
 2. 密钥 = Base64解码(设备密钥)
-   例: Base64Decode("UG83cDgySktEQWZhNHdLRXQ2WHd6TGRaZUtSdG9CZTI=")
+   例: Base64Decode("aGVsbG9fd29ybGRfZGV2aWNlX2tleV9leGFtcGxl")
 
 3. 签名 = Base64Encode(HMAC-SHA1(密钥, 签名内容))
 
@@ -647,9 +648,317 @@ gateway.hotSwapPlugin("/usr/lib/iot/plugins/libsimulated_plugin.so", "");
 
 ***
 
-## 7. MQTT通信与云平台接入
+## 7. 边缘计算模块
 
-### 7.1 OneNET平台配置
+### 7.1 概述
+
+边缘计算模块（EdgeCompute）位于数据管理层和云上报层之间，在传感器数据上云之前进行本地实时智能处理。通过滤波降噪、统计分析、阈值告警和变化检测等手段，减少云端带宽消耗、降低延迟，并支持离线自治运行。
+
+**数据处理流水线：**
+
+```
+SensorReader → DataManager → EdgeCompute → MqttPublisher/DisplayManager
+                    │              │
+                    │   ┌──────────▼─────────────────────────┐
+                    │   │  边缘计算处理流水线                    │
+                    │   │                                      │
+                    │   │  1. 滑动窗口移动平均滤波 → 消除噪声    │
+                    │   │  2. 时间窗口统计分析 → 趋势洞察        │
+                    │   │  3. 带滞回阈值告警 → 防告警风暴        │
+                    │   │  4. 变化检测判断 → 减少冗余上报        │
+                    │   │  5. 传感器故障检测 → 自动监控          │
+                    │   │  6. 资源占用监控 → CPU/内存            │
+                    │   └──────────────────────────────────────┘
+                    │              │
+                    │       环形缓冲区（最近1小时数据）
+                    │
+              回调通知消费者
+```
+
+### 7.2 核心功能
+
+#### 7.2.1 滑动窗口滤波
+
+使用移动平均滤波器对原始传感器数据进行平滑处理，消除瞬时噪声和毛刺：
+
+```
+原始数据: [25.1, 26.3, 24.8, 25.5, 25.0]
+滤波窗口(window=3):
+  25.1 → avg(25.1) = 25.1
+  26.3 → avg(25.1, 26.3) = 25.7
+  24.8 → avg(25.1, 26.3, 24.8) = 25.4
+  25.5 → avg(26.3, 24.8, 25.5) = 25.5
+  25.0 → avg(24.8, 25.5, 25.0) = 25.1
+```
+
+- **默认窗口大小**：5 个采样点
+- **时间复杂度**：O(windowSize)，对嵌入式 ARM 友好
+- **可配置**：通过 `filterWindowSize` 运行时调整
+
+#### 7.2.2 时间窗口统计分析
+
+在可配置的时间窗口内计算统计指标：
+
+| 统计量 | 说明 | 用途 |
+|--------|------|------|
+| min/max | 窗口内最小/最大值 | 异常检测 |
+| avg | 窗口内算术平均值 | 趋势分析 |
+| stdDev | 窗口内标准差 | 波动性量化 |
+
+- **默认窗口**：60 秒（30 个采样点 @ 2s 间隔）
+- **滑动窗口**：仅保留最近 N 个数据点
+
+#### 7.2.3 带滞回的阈值告警
+
+采用施密特触发（Schmitt Trigger）机制，防止告警在阈值边界反复触发/解除（告警风暴）：
+
+```
+高温告警 (high=35°C, hysteresis=2°C):
+
+温度 ↑
+  35 ──────── ╔═══════════ 触发告警
+              ║
+  33 ──────── ╚═══════════ 解除告警（hysteresis）
+温度 ↓
+```
+
+**告警类型：**
+
+| 告警类型 | 默认阈值 | 级别 |
+|---------|---------|------|
+| 高温告警 | > 40°C | WARN |
+| 低温告警 | < 0°C | WARN |
+| 高湿告警 | > 90% | WARN |
+| 低湿告警 | < 20% | WARN |
+| 高光照告警 | > 1000 lux | INFO |
+| 传感器故障 | 连续10次无效 | CRITICAL |
+| 资源告警 | CPU>80% 或 MEM>80% | WARN |
+
+**回调机制**：告警状态变化时通过 `registerAlertCallback()` 通知上层应用。
+
+#### 7.2.4 变化检测
+
+当数据变化量低于阈值时，标记为"无显著变化"，下游可据此跳过上报以减少带宽消耗：
+
+- 温度变化阈值：默认 0.5°C
+- 湿度变化阈值：默认 1.0%
+- 光照变化阈值：默认 10 lux
+
+#### 7.2.5 资源监控
+
+通过 `/proc` 文件系统实时监控网关进程的资源占用：
+
+- **CPU 使用率**：读取 `/proc/self/stat`，计算 utime+stime 时间差
+- **内存使用**：读取 `/proc/self/status` 的 VmRSS 字段
+- **内存总量**：读取 `/proc/meminfo` 的 MemTotal 字段
+- **无外部依赖**：直接读取 proc 文件系统，适合嵌入式环境
+
+### 7.3 数据结构
+
+#### EdgeSensorData - 处理后数据
+
+```cpp
+struct EdgeSensorData {
+    float temperature;       // 原始温度（°C）
+    float humidity;          // 原始湿度（%）
+    float light;             // 原始光照（lux）
+    float tempFiltered;      // 滤波后温度
+    float humiFiltered;      // 滤波后湿度
+    float lightFiltered;     // 滤波后光照
+    float tempAvg;           // 时间窗口内温度平均值
+    float humiAvg;           // 时间窗口内湿度平均值
+    float lightAvg;          // 时间窗口内光照平均值
+    float tempMin;           // 时间窗口内温度最小值
+    float tempMax;           // 时间窗口内温度最大值
+    float tempStdDev;        // 时间窗口内温度标准差
+    bool  dataChanged;       // 数据是否发生显著变化
+    bool  valid;             // 数据有效性
+};
+```
+
+#### AlertEvent - 告警事件
+
+```cpp
+struct AlertEvent {
+    AlertType type;              // 告警类型枚举
+    AlertLevel level;            // 告警级别（NONE/INFO/WARN/CRITICAL）
+    float currentValue;          // 当前触发值
+    float thresholdValue;        // 触发阈值
+    uint64_t timestamp;          // 告警时间戳（毫秒）
+    std::string message;         // 告警描述信息
+    bool active;                 // 告警是否仍然活跃
+};
+```
+
+### 7.4 API 接口
+
+#### EdgeCompute 类
+
+```cpp
+class EdgeCompute {
+public:
+    struct Config {
+        bool enabled = true;               // 是否启用边缘计算
+        int filterWindowSize = 5;           // 滑动平均窗口大小
+        int statsWindowSec = 60;           // 统计窗口时长（秒）
+        float changeThresholdTemp = 0.5f;  // 温度变化检测阈值
+        float changeThresholdHumi = 1.0f;  // 湿度变化检测阈值
+        float changeThresholdLight = 10.0f; // 光照变化检测阈值
+        float highTempThreshold = 40.0f;   // 高温告警阈值
+        float lowTempThreshold = 0.0f;     // 低温告警阈值
+        float highHumiThreshold = 90.0f;   // 高湿告警阈值
+        float lowHumiThreshold = 20.0f;    // 低湿告警阈值
+        float highLightThreshold = 1000.0f; // 高光照告警阈值
+        float alertHysteresis = 2.0f;      // 告警滞回值
+        int sensorFaultTimeout = 10;        // 传感器故障超时（次）
+        int ringBufferSize = 3600;         // 环形缓冲区大小
+        bool enableResourceMonitor = true;  // 是否启用资源监控
+        float cpuWarnThreshold = 80.0f;     // CPU 告警阈值（%）
+        float memWarnThreshold = 80.0f;     // 内存告警阈值（%）
+    };
+
+    bool init(const Config &cfg, int collectIntervalMs = 2000);
+    EdgeSensorData processData(const SensorData &raw);
+    EdgeSensorData getLatestProcessed();
+    WindowStats getWindowStats(int dataType);      // 0=温度,1=湿度,2=光照
+    std::vector<AlertEvent> getActiveAlerts();
+    std::vector<EdgeSensorData> getRecentData(int count);
+    ResourceUsage getResourceUsage();
+    void registerDataCallback(EdgeDataCallback cb);
+    void registerAlertCallback(AlertCallback cb);
+    void updateConfig(const Config &cfg);
+    void reset();
+};
+```
+
+#### GatewaySDK 集成接口
+
+```cpp
+class GatewaySDK {
+    // ... 其他接口 ...
+
+    EdgeSensorData getLatestEdgeData();           // 获取边缘计算最新数据
+    std::vector<AlertEvent> getActiveAlerts();    // 获取活跃告警
+    void onAlert(AlertCallback cb);               // 注册告警回调
+    ResourceUsage getResourceUsage();              // 获取资源使用情况
+};
+```
+
+### 7.5 线程安全设计
+
+- **dataMutex_**：保护 `processedData_` 最新数据快照
+- **filterMutex_**：保护三个滑动滤波窗口
+- **alertMutex_**：`std::recursive_mutex` 递归锁，保护告警状态（fireAlert 可在 checkThresholdAlert 内嵌套调用）
+- **ringMutex_**：保护环形缓冲区
+- **cbMutex_**：保护回调函数列表
+
+### 7.6 测试覆盖
+
+项目提供 4 套完整测试，总计 **121 项**，覆盖单元测试、集成测试和系统测试：
+
+| 测试套件 | 类型 | 数量 | 编译目标 | 覆盖内容 |
+|---------|------|------|---------|---------|
+| `edge_compute_test` | 单元测试 | 34 | `edge_compute_test` | 滑动滤波、窗口统计、滞回告警、变化检测、环形缓冲、资源监控、回调机制 |
+| `onenet_test` | 单元测试 | 35 | `onenet_test` | Token生成(HMAC-SHA1)、Base64编解码、JSON载荷格式化、MQTT连接参数、边界条件 |
+| `integration_test` | 集成测试 | 28 | `integration_test` | EdgeCompute回调链、多消费者、PluginLoader加载/卸载、告警生命周期(触发→滞回→清除)、环形缓冲持久化 |
+| `system_test` | 系统测试 | 24 | `system_test` | GatewaySDK完整生命周期(init→start→stop)、多次启停循环、回调注册验证、插件列表、配置变体、异常处理 |
+
+**edge_compute_test 详细覆盖：**
+
+| 测试模块 | 测试数量 | 覆盖内容 |
+|---------|---------|---------|
+| Init & Config | 3 | 默认/自定义初始化，状态检查 |
+| Moving Average | 3 | 单样本/多样本/窗口滑动 |
+| Window Statistics | 2 | 多样本统计/窗口滚动 |
+| Change Detection | 3 | 初始变化/小变化/显著变化 |
+| Threshold Alerts | 5 | 触发/解除/滞回/回调/多告警 |
+| Sensor Fault | 2 | 故障检测/故障恢复 |
+| Ring Buffer | 2 | 数据存储/窗口限制 |
+| Resource Monitor | 2 | 可用/禁用 |
+| Config Update | 1 | 运行时配置更新 |
+| Reset | 1 | 全状态清除 |
+| Data Callback | 2 | 数据提交通知/多回调 |
+
+**测试结果（x86 + ARM 双平台验证通过）：**
+
+```
+edge_compute_test:  34/34 PASS  ✅
+onenet_test:        35/35 PASS  ✅
+integration_test:   28/28 PASS  ✅
+system_test:        24/24 PASS  ✅
+───────────────────────────────
+总计:              121/121 PASS ✅
+```
+
+运行 x86 测试：
+
+```bash
+cd /home/lin/Desktop/IOT_Gateway
+cmake -B build_x86 -S .
+cmake --build build_x86 -j$(nproc)
+./build_x86/edge_compute_test
+./build_x86/onenet_test
+./build_x86/integration_test
+./build_x86/system_test
+```
+
+ARM 交叉编译测试：
+
+```bash
+cmake -B build_arm -DCMAKE_TOOLCHAIN_FILE=tools/arm-linux-gnueabihf.cmake -S .
+cmake --build build_arm -j$(nproc)
+# ARM 二进制文件在 build_arm/ 下，需部署到开发板运行
+```
+
+### 7.7 编译配置
+
+边缘计算模块已集成到主 CMakeLists.txt 构建系统：
+
+```cmake
+set(SOURCES
+    src/app/main.cpp
+    src/app/logger.cpp
+    src/app/sensor_reader.cpp
+    src/app/data_manager.cpp
+    src/app/mqtt_publisher.cpp
+    src/app/onenet_iot.cpp
+    src/app/edge_compute.cpp        # 边缘计算模块
+    src/sdk/gateway_sdk.cpp
+    src/plugin/plugin_loader.cpp
+)
+
+# 测试目标
+add_executable(edge_compute_test src/app/edge_compute_test.cpp ...)
+add_executable(onenet_test src/app/onenet_test.cpp src/app/onenet_iot.cpp)
+add_executable(integration_test src/app/integration_test.cpp ...)
+add_executable(system_test src/app/system_test.cpp ...)
+```
+
+交叉编译：
+
+```bash
+cmake -B build_arm \
+    -DCMAKE_TOOLCHAIN_FILE=tools/arm-linux-gnueabihf.cmake \
+    -DCMAKE_BUILD_TYPE=Release \
+    -S .
+cmake --build build_arm -j$(nproc)
+```
+
+编译产物：
+
+| 产物 | 路径 | 架构 | 说明 |
+|------|------|------|------|
+| 主程序 | `build_arm/iot_gateway` | ARM 32-bit EABI5 | 网关主程序 |
+| 边缘计算测试 | `build_arm/edge_compute_test` | ARM 32-bit EABI5 | 34项单元测试 |
+| OneNET测试 | `build_arm/onenet_test` | ARM 32-bit EABI5 | 35项单元测试 |
+| 集成测试 | `build_arm/integration_test` | ARM 32-bit EABI5 | 28项集成测试 |
+| 系统测试 | `build_arm/system_test` | ARM 32-bit EABI5 | 24项系统测试 |
+
+***
+
+## 8. MQTT通信与云平台接入
+
+### 8.1 OneNET平台配置
 
 #### 创建产品和设备
 
@@ -665,7 +974,7 @@ gateway.hotSwapPlugin("/usr/lib/iot/plugins/libsimulated_plugin.so", "");
 
 4. 注册设备，获取：产品ID、设备名称、设备密钥
 
-### 7.2 本地MQTT测试
+### 8.2 本地MQTT测试
 
 ```bash
 # 开发板上启动mosquitto
@@ -680,9 +989,9 @@ sudo ./iot_gateway --mqtt localhost
 
 ***
 
-## 8. LCD显示（Framebuffer + LVGL）
+## 9. LCD显示（Framebuffer + LVGL）
 
-### 8.1 显示方案对比
+### 9.1 显示方案对比
 
 | 特性 | LVGL图形界面 | 简单Framebuffer |
 |------|-----------|--------------|
@@ -693,7 +1002,7 @@ sudo ./iot_gateway --mqtt localhost
 | 刷新率 | ~30fps | ~5fps |
 | 适用场景 | 产品级UI展示 | 快速验证/极简场景 |
 
-### 8.2 LVGL图形界面
+### 9.2 LVGL图形界面
 
 ```
 ┌──────────────────────────────────────────┐
@@ -714,32 +1023,40 @@ sudo ./iot_gateway --mqtt localhost
 
 ***
 
-## 9. SDK封装
+## 10. SDK封装
 
-### 9.1 SDK API
+### 10.1 SDK API
 
 ```cpp
 namespace iot {
 
 class GatewaySDK {
 public:
+    struct GatewayConfig {
+        // ... 基础配置 ...
+        // OneNET 配置（运行时通过 CLI 参数传入，无硬编码默认值）
+        MqttConfig mqtt;
+    };
+
     bool init(const GatewayConfig &cfg);
     bool start();
     void stop();
+
     SensorData getLatestData();
+    EdgeSensorData getLatestEdgeData();
+    std::vector<AlertEvent> getActiveAlerts();
     void onData(SensorDataCallback cb);
-    bool readSensors(float &t, float &h, float &l);
-    bool sendToCloud(const std::string &json);
-    bool isRunning() const;
-    bool hotSwapPlugin(const std::string &newPath, const std::string &config);
-    std::string getPluginName() const;
+    void onAlert(AlertCallback cb);
+    ResourceUsage getResourceUsage();
+    bool hotSwapPlugin(const std::string &path, const std::string &config = "");
     std::vector<PluginInfo> listPlugins();
 };
-
-}
+} // namespace iot
 ```
 
-### 9.2 GatewayConfig配置项
+> ⚠️ **安全注意事项**：OneNET 的设备密钥（deviceKey）用于生成 Token 签名，不应硬编码在源码中。通过 CLI 参数 `--onenet-dk` 传入。MQTT 密码/Token 不会输出到日志中。
+
+### 10.2 GatewayConfig配置项
 
 ```cpp
 struct GatewayConfig {
@@ -808,7 +1125,28 @@ struct GatewayConfig {
 | 7  | CMake 构建系统更新          | ✅  |
 | 8  | 部署脚本更新                | ✅  |
 
-#### 第三阶段：从零构建定制Linux系统（待开发）
+#### 第三阶段：边缘计算与全面测试（✅ 已完成）
+
+| 步骤 | 任务                    | 状态 |
+| -- | --------------------- | -- |
+| 1  | 边缘计算模块设计             | ✅  |
+| 2  | 滑动窗口滤波实现             | ✅  |
+| 3  | 时间窗口统计分析             | ✅  |
+| 4  | 带滞回阈值告警               | ✅  |
+| 5  | 变化检测判断                | ✅  |
+| 6  | 传感器故障检测               | ✅  |
+| 7  | 资源占用监控（CPU/内存）      | ✅  |
+| 8  | 环形缓冲区实现               | ✅  |
+| 9  | GatewaySDK 集成          | ✅  |
+| 10 | 安全审计与修复              | ✅  |
+| 11 | 边缘计算单元测试（34项）       | ✅  |
+| 12 | OneNET认证单元测试（35项）    | ✅  |
+| 13 | 模块集成测试（28项）          | ✅  |
+| 14 | 系统级测试（24项）           | ✅  |
+| 15 | x86 + ARM 双平台编译验证     | ✅  |
+| 16 | 技术文档更新                | ✅  |
+
+#### 第四阶段：从零构建定制Linux系统（待开发）
 
 | 步骤 | 任务          | 说明               |
 | -- | ----------- | ---------------- |
@@ -824,7 +1162,8 @@ struct GatewayConfig {
 ### C. 进阶方向
 
 1. **插件层面**: MQTT远程热替换、插件配置持久化、插件依赖管理
-2. **系统层面**: Buildroot/Yocto构建定制系统
+2. **系统层面**: Buildroot/Yocto构建定制系统（详见第四阶段）
 3. **驱动层面**: 中断处理、DMA、设备树深入
 4. **网络层面**: TLS加密、OTA升级
-5. **应用层面**: LVGL图表控件、Docker容器、边缘计算
+5. **应用层面**: LVGL图表控件、Docker容器
+6. **测试层面**: 开发板硬件在环测试（HIL）、长期稳定性测试、压力测试

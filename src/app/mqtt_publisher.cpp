@@ -112,7 +112,6 @@ bool MqttPublisher::init(const Config &cfg)
     LOG_I("MQTT", "  Host: %s:%d", cfg_.host.c_str(), cfg_.port);
     LOG_I("MQTT", "  ClientID: %s", cfg_.clientId.c_str());
     LOG_D("MQTT", "  Username: %s", cfg_.username.c_str());
-    LOG_D("MQTT", "  Password: %s", cfg_.password.c_str());
     LOG_I("MQTT", "  Topic: %s", cfg_.topic.c_str());
 
 #ifdef USE_MOSQUITTO

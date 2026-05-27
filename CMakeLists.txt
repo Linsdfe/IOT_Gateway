@@ -25,6 +25,7 @@ set(SOURCES
     src/app/data_manager.cpp
     src/app/mqtt_publisher.cpp
     src/app/onenet_iot.cpp
+    src/app/edge_compute.cpp
     src/sdk/gateway_sdk.cpp
     src/plugin/plugin_loader.cpp
 )
@@ -144,3 +145,79 @@ install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
 install(TARGETS sht30_bh1750_i2c_plugin sht30_bh1750_kernel_plugin sht30_bh1750_custom_plugin simulated_plugin
     LIBRARY DESTINATION lib/iot/plugins
 )
+
+# Edge Compute Unit Tests
+add_executable(edge_compute_test
+    src/app/edge_compute_test.cpp
+    src/app/edge_compute.cpp
+    src/app/logger.cpp
+)
+target_include_directories(edge_compute_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/app
+    ${CMAKE_SOURCE_DIR}/src/sdk
+    ${CMAKE_SOURCE_DIR}/src/plugin
+)
+target_link_libraries(edge_compute_test PRIVATE Threads::Threads)
+
+# OnenetIotConfig Unit Tests
+add_executable(onenet_test
+    src/app/onenet_test.cpp
+    src/app/onenet_iot.cpp
+)
+target_include_directories(onenet_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/app
+    ${CMAKE_SOURCE_DIR}/src/sdk
+    ${CMAKE_SOURCE_DIR}/src/plugin
+)
+target_link_libraries(onenet_test PRIVATE Threads::Threads)
+if(CMAKE_CROSSCOMPILING)
+    target_include_directories(onenet_test PRIVATE ${SYSROOT_INC})
+    target_link_libraries(onenet_test PRIVATE ${LIBSSL_SO} ${LIBCRYPTO_SO})
+else()
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(onenet_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
+
+# Integration Tests
+add_executable(integration_test
+    src/app/integration_test.cpp
+    src/app/edge_compute.cpp
+    src/app/sensor_reader.cpp
+    src/app/data_manager.cpp
+    src/plugin/plugin_loader.cpp
+    src/app/logger.cpp
+)
+target_include_directories(integration_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/app
+    ${CMAKE_SOURCE_DIR}/src/sdk
+    ${CMAKE_SOURCE_DIR}/src/plugin
+)
+target_link_libraries(integration_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+
+# System Tests (full stack)
+add_executable(system_test
+    src/app/system_test.cpp
+    src/app/edge_compute.cpp
+    src/app/sensor_reader.cpp
+    src/app/data_manager.cpp
+    src/app/mqtt_publisher.cpp
+    src/app/display_manager.cpp
+    src/plugin/plugin_loader.cpp
+    src/app/logger.cpp
+    src/sdk/gateway_sdk.cpp
+    src/app/onenet_iot.cpp
+)
+target_include_directories(system_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/app
+    ${CMAKE_SOURCE_DIR}/src/sdk
+    ${CMAKE_SOURCE_DIR}/src/plugin
+)
+target_link_libraries(system_test PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+if(CMAKE_CROSSCOMPILING)
+    target_include_directories(system_test PRIVATE ${SYSROOT_INC})
+    target_link_libraries(system_test PRIVATE ${LIBSSL_SO} ${LIBCRYPTO_SO})
+    target_link_options(system_test PRIVATE "-Wl,--allow-shlib-undefined")
+else()
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(system_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()

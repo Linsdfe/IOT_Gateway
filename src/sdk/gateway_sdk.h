@@ -23,6 +23,7 @@
 #include "sensor_reader.h"
 #include "data_manager.h"
 #include "mqtt_publisher.h"
+#include "edge_compute.h"
 
 #if defined(USE_LVGL)
 #include "lvgl_display.h"
@@ -96,12 +97,37 @@ public:
      */
     std::vector<PluginInfo> listPlugins();
 
+    /**
+     * @brief 获取边缘计算处理后的最新数据
+     * @return EdgeSensorData 快照
+     */
+    EdgeSensorData getLatestEdgeData();
+
+    /**
+     * @brief 获取当前所有活跃告警
+     * @return 告警事件列表
+     */
+    std::vector<AlertEvent> getActiveAlerts();
+
+    /**
+     * @brief 注册告警回调
+     * @param cb 告警回调函数
+     */
+    void onAlert(AlertCallback cb);
+
+    /**
+     * @brief 获取资源使用情况
+     * @return ResourceUsage 快照
+     */
+    ResourceUsage getResourceUsage();
+
 private:
     GatewayConfig cfg_;
     bool running_;
     std::unique_ptr<SensorReader> sensor_;
     std::unique_ptr<DataManager> dataMgr_;
     std::unique_ptr<MqttPublisher> mqtt_;
+    std::unique_ptr<EdgeCompute> edge_;
 
 #if defined(USE_LVGL)
     std::unique_ptr<LvglDisplay> display_;

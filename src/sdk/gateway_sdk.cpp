@@ -51,6 +51,14 @@ bool GatewaySDK::init(const GatewayConfig &cfg)
 
     dataMgr_.reset(new DataManager());
 
+    edge_.reset(new EdgeCompute());
+    EdgeCompute::Config edgeCfg;
+    edgeCfg.enabled = true;
+    edgeCfg.filterWindowSize = 5;
+    edgeCfg.statsWindowSec = 60;
+    edgeCfg.ringBufferSize = 3600;
+    edge_->init(edgeCfg, cfg_.collectIntervalMs);
+
     if (cfg_.enableMqtt) {
         mqtt_.reset(new MqttPublisher());
         if (!mqtt_->init(cfg_.mqtt)) {
@@ -75,10 +83,21 @@ bool GatewaySDK::init(const GatewayConfig &cfg)
 
 bool GatewaySDK::start()
 {
+    if (!dataMgr_) {
+        LOG_E("SDK", "not initialized, call init() first");
+        return false;
+    }
+
     if (!dataMgr_->start(sensor_.get(), cfg_.collectIntervalMs)) {
         LOG_E("SDK", "data manager start failed");
         return false;
     }
+
+    dataMgr_->registerCallback([this](const SensorData &raw) {
+        if (edge_) {
+            edge_->processData(raw);
+        }
+    });
 
     if (mqtt_ && cfg_.enableMqtt) {
         mqtt_->start(dataMgr_.get());
@@ -151,6 +170,29 @@ std::vector<PluginInfo> GatewaySDK::listPlugins()
 {
     if (!sensor_) return {};
     return sensor_->listPlugins();
+}
+
+EdgeSensorData GatewaySDK::getLatestEdgeData()
+{
+    if (edge_) return edge_->getLatestProcessed();
+    return EdgeSensorData();
+}
+
+std::vector<AlertEvent> GatewaySDK::getActiveAlerts()
+{
+    if (edge_) return edge_->getActiveAlerts();
+    return {};
+}
+
+void GatewaySDK::onAlert(AlertCallback cb)
+{
+    if (edge_) edge_->registerAlertCallback(cb);
+}
+
+ResourceUsage GatewaySDK::getResourceUsage()
+{
+    if (edge_) return edge_->getResourceUsage();
+    return ResourceUsage();
 }
 
 }

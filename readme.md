@@ -26,6 +26,7 @@
 - ✅ **四种驱动模式** — 模拟数据 / 用户空间I2C / 标准内核驱动(IIO/HWMON) / 自定义内核驱动
 - ✅ **自动驱动管理** — i2c 和 custom 插件自动释放/恢复内核驱动绑定，无需手动操作
 - ✅ **MQTT 云平台** — OneNET Token 签名认证，物模型数据上报
+- ✅ **边缘计算** — 滑动窗口滤波、统计分析、带滞回阈值告警、变化检测、资源监控
 - ✅ **LCD 显示** — LVGL 仪表盘 + Framebuffer 文本双方案
 - ✅ **统一 SDK** — init/start/stop/onData/hotSwap 简洁 API
 
@@ -58,6 +59,10 @@
 │                       │                                      │
 │  ┌────────────────────▼──────────────────────────────────┐  │
 │  │              DataManager (多线程数据管理)               │  │
+│  └────────────────────┬──────────────────────────────────┘  │
+│                       │                                      │
+│  ┌────────────────────▼──────────────────────────────────┐  │
+│  │              EdgeCompute (边缘计算)                     │  │
 │  └──┬──────────┬──────────────┬──────────────────────────┘  │
 │     │          │              │                              │
 │  ┌──▼───┐  ┌──▼───────┐  ┌──▼──────────────────────────┐  │
@@ -102,6 +107,11 @@ IOT_Gateway/
 │   │   ├── main.cpp                    # 主程序入口
 │   │   ├── sensor_reader.h/cpp         # 传感器读取（插件桥接）
 │   │   ├── data_manager.h/cpp          # 多线程数据管理
+│   │   ├── edge_compute.h/cpp          # 边缘计算模块（滤波/统计/告警）
+│   │   ├── edge_compute_test.cpp       # 边缘计算单元测试（34项）
+│   │   ├── onenet_test.cpp             # OneNET认证单元测试（35项）
+│   │   ├── integration_test.cpp        # 模块集成测试（28项）
+│   │   ├── system_test.cpp             # 系统级测试（24项）
 │   │   ├── mqtt_publisher.h/cpp        # MQTT客户端
 │   │   ├── onenet_iot.h/cpp            # OneNET认证
 │   │   ├── lvgl_display.h/cpp          # LVGL图形界面
@@ -220,9 +230,9 @@ sshpass -p temppwd ssh debian@192.168.7.2 \
 ```bash
 sshpass -p temppwd ssh debian@192.168.7.2 \
   "sudo ~/iot_gateway --plugin sht30_bh1750_kernel \
-   --onenet-pid XUV077XBf9 \
-   --onenet-dn imx6ull_01 \
-   --onenet-dk UG83cDgySktEQWZhNHdLRXQ2WHd6TGRaZUtSdG9CZTI="
+   --onenet-pid <YOUR_PRODUCT_ID> \
+   --onenet-dn <YOUR_DEVICE_NAME> \
+   --onenet-dk <YOUR_DEVICE_KEY>"
 ```
 
 ### 2.7 常用命令速查
@@ -315,6 +325,39 @@ cmake .. -DCMAKE_TOOLCHAIN_FILE=../tools/arm-linux-gnueabihf.cmake \
 
 # 仅传感器采集（无显示无MQTT，最精简）
 cmake .. -DCMAKE_TOOLCHAIN_FILE=../tools/arm-linux-gnueabihf.cmake
+```
+
+### 3.4 运行测试
+
+项目提供 4 套测试，覆盖单元测试、集成测试和系统测试：
+
+```bash
+cd /home/lin/Desktop/IOT_Gateway
+
+# x86 本地测试（无需交叉编译）
+cmake -B build_x86 -S .
+cmake --build build_x86 -j$(nproc)
+
+# 运行全部测试
+./build_x86/edge_compute_test     # 边缘计算单元测试（34项）
+./build_x86/onenet_test           # OneNET认证单元测试（35项）
+./build_x86/integration_test      # 模块集成测试（28项）
+./build_x86/system_test           # 系统级测试（24项）
+```
+
+| 测试套件 | 类型 | 数量 | 覆盖内容 |
+|---------|------|------|---------|
+| `edge_compute_test` | 单元测试 | 34 | 滑动滤波、窗口统计、滞回告警、变化检测、环形缓冲、资源监控 |
+| `onenet_test` | 单元测试 | 35 | Token生成、Base64编解码、JSON载荷、MQTT参数、边界条件 |
+| `integration_test` | 集成测试 | 28 | 回调链、数据流、插件加载/卸载、告警生命周期、环形缓冲持久化 |
+| `system_test` | 系统测试 | 24 | SDK生命周期、多次启停循环、回调注册、插件列表、配置变体、异常处理 |
+
+ARM 交叉编译测试（产物不可在 x86 运行）：
+
+```bash
+cmake -B build_arm -DCMAKE_TOOLCHAIN_FILE=tools/arm-linux-gnueabihf.cmake -S .
+cmake --build build_arm -j$(nproc)
+file build_arm/*_test                          # 验证 ARM 架构
 ```
 
 ***
@@ -410,9 +453,9 @@ sudo ~/iot_gateway --plugin sht30_bh1750_custom --no-display --no-mqtt
 
 # 传感器采集 + LCD显示 + OneNET云平台
 sudo ~/iot_gateway --plugin sht30_bh1750_kernel \
-  --onenet-pid XUV077XBf9 \
-  --onenet-dn imx6ull_01 \
-  --onenet-dk UG83cDgySktEQWZhNHdLRXQ2WHd6TGRaZUtSdG9CZTI=
+  --onenet-pid <YOUR_PRODUCT_ID> \
+  --onenet-dn <YOUR_DEVICE_NAME> \
+  --onenet-dk <YOUR_DEVICE_KEY>
 
 # 传感器采集 + LCD显示 + 本地MQTT
 sudo ~/iot_gateway --plugin sht30_bh1750_kernel --mqtt localhost
